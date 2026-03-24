@@ -1,21 +1,9 @@
 "use client";
 
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { initializeApp, getApps } from "firebase/app";
-import {
-  Database,
-  getDatabase,
-  onChildAdded,
-  push,
-  ref,
-  serverTimestamp,
-  query,
-  limitToLast
-} from "firebase/database";
 
 type ChatMessage = {
   id: string;
-  roomId: string;
   author: string;
   text: string;
   createdAt: number;
@@ -26,27 +14,6 @@ type JoinForm = {
   roomId: string;
 };
 
-const firebaseConfig = {
-  apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
-  authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
-  databaseURL: process.env.NEXT_PUBLIC_FIREBASE_DATABASE_URL,
-  projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
-  storageBucket: process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET,
-  messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
-  appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID
-};
-
-function getMissingEnv() {
-  return Object.entries(firebaseConfig)
-    .filter(([, value]) => !value)
-    .map(([key]) => key);
-}
-
-function createDatabase(): Database {
-  const app = getApps()[0] ?? initializeApp(firebaseConfig);
-  return getDatabase(app);
-}
-
 function formatTime(value: number) {
   return new Intl.DateTimeFormat("ru-RU", {
     hour: "2-digit",
@@ -55,7 +22,7 @@ function formatTime(value: number) {
 }
 
 function sanitizeRoomId(value: string) {
-  return value.toLowerCase().replace(/[^a-z0-9_-]/g, "").slice(0, 32);
+  return value.toLowerCase().replace(/[^a-z0-9_-]/g, "").slice(0, 32) || "general";
 }
 
 export function RoboChat() {
@@ -63,72 +30,81 @@ export function RoboChat() {
   const [joined, setJoined] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [draft, setDraft] = useState("");
-  const [error, setError] = useState<string>("");
+  const [error, setError] = useState("");
   const [isSending, setIsSending] = useState(false);
 
-  const dbRef = useRef<Database | null>(null);
+  const timerRef = useRef<NodeJS.Timeout | null>(null);
+  const lastCreatedAtRef = useRef<number>(0);
 
-  const activeRoom = useMemo(() => sanitizeRoomId(joinForm.roomId) || "general", [joinForm.roomId]);
+  const activeRoom = useMemo(() => sanitizeRoomId(joinForm.roomId), [joinForm.roomId]);
   const nickname = useMemo(() => joinForm.nickname.trim().slice(0, 30), [joinForm.nickname]);
-  const missingEnv = getMissingEnv();
 
   useEffect(() => {
     if (!joined) {
       return;
     }
 
-    try {
-      const db = dbRef.current ?? createDatabase();
-      dbRef.current = db;
+    let cancelled = false;
 
-      const messagesQuery = query(ref(db, `rooms/${activeRoom}/messages`), limitToLast(100));
-      setMessages([]);
+    async function fetchMessages(initial = false) {
+      try {
+        const params = new URLSearchParams({ room: activeRoom });
+        if (!initial && lastCreatedAtRef.current > 0) {
+          params.set("after", String(lastCreatedAtRef.current));
+        }
 
-      const unsubscribe = onChildAdded(messagesQuery, (snapshot) => {
-        const value = snapshot.val() as { author?: string; text?: string; createdAt?: number } | null;
-        if (!value?.text || !value?.author) {
+        const response = await fetch(`/api/messages?${params.toString()}`, {
+          cache: "no-store"
+        });
+
+        if (!response.ok) {
+          throw new Error("Не удалось загрузить сообщения.");
+        }
+
+        const payload = (await response.json()) as { messages: ChatMessage[] };
+        if (cancelled || payload.messages.length === 0) {
           return;
         }
 
-        const message: ChatMessage = {
-          id: snapshot.key ?? crypto.randomUUID(),
-          roomId: activeRoom,
-          author: value.author,
-          text: value.text,
-          createdAt: typeof value.createdAt === "number" ? value.createdAt : Date.now()
-        };
-
         setMessages((prev) => {
-          if (prev.some((item) => item.id === message.id)) {
-            return prev;
+          const map = new Map(prev.map((message) => [message.id, message]));
+          payload.messages.forEach((message) => map.set(message.id, message));
+          const merged = Array.from(map.values()).sort((a, b) => a.createdAt - b.createdAt);
+          const last = merged[merged.length - 1];
+          if (last) {
+            lastCreatedAtRef.current = Math.max(lastCreatedAtRef.current, last.createdAt);
           }
-          return [...prev, message];
+          return merged.slice(-120);
         });
-      });
-
-      return () => {
-        unsubscribe();
-      };
-    } catch {
-      setError("Не удалось подключиться к Firebase. Проверьте переменные окружения.");
+      } catch {
+        if (!cancelled) {
+          setError("Проблема с сервером чата. Повторите попытку.");
+        }
+      }
     }
+
+    setMessages([]);
+    setError("");
+    lastCreatedAtRef.current = 0;
+
+    fetchMessages(true);
+    timerRef.current = setInterval(() => {
+      fetchMessages(false);
+    }, 1500);
+
+    return () => {
+      cancelled = true;
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+      }
+    };
   }, [joined, activeRoom]);
 
   function joinChat(event: FormEvent) {
     event.preventDefault();
 
-    if (missingEnv.length > 0) {
-      setError(`Заполните env переменные Firebase: ${missingEnv.join(", ")}`);
-      return;
-    }
-
     if (!nickname) {
       setError("Введите имя пользователя.");
-      return;
-    }
-
-    if (!activeRoom) {
-      setError("Введите room ID (латиница/цифры). Например: general");
       return;
     }
 
@@ -140,23 +116,35 @@ export function RoboChat() {
     event.preventDefault();
 
     const text = draft.trim();
-    if (!text || !joined || !dbRef.current) {
+    if (!text || !joined) {
       return;
     }
 
     setIsSending(true);
+
     try {
-      const roomMessagesRef = ref(dbRef.current, `rooms/${activeRoom}/messages`);
-      await push(roomMessagesRef, {
-        author: nickname,
-        text,
-        createdAt: serverTimestamp()
+      const response = await fetch("/api/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          room: activeRoom,
+          author: nickname,
+          text
+        })
       });
 
+      if (!response.ok) {
+        const payload = (await response.json()) as { error?: string };
+        throw new Error(payload.error ?? "Не удалось отправить сообщение");
+      }
+
+      const payload = (await response.json()) as { message: ChatMessage };
+      setMessages((prev) => [...prev, payload.message]);
+      lastCreatedAtRef.current = Math.max(lastCreatedAtRef.current, payload.message.createdAt);
       setDraft("");
       setError("");
-    } catch {
-      setError("Не удалось отправить сообщение. Повторите попытку.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось отправить сообщение.");
     } finally {
       setIsSending(false);
     }
@@ -167,7 +155,7 @@ export function RoboChat() {
       <main className="join-layout">
         <section className="join-card">
           <h1>RoboChat</h1>
-          <p>Реальный чат для людей. Подключи Firebase и общайся в комнате.</p>
+          <p>Чат с файловой БД. Люди пишут в одну комнату и видят сообщения друг друга.</p>
 
           <form className="join-form" onSubmit={joinChat}>
             <label>
@@ -203,6 +191,7 @@ export function RoboChat() {
         <div className="brand">RoboChat</div>
         <p className="chat-status">Пользователь: {nickname}</p>
         <p className="chat-status">Комната: #{activeRoom}</p>
+        <p className="chat-status">Обновление: каждые 1.5 сек</p>
       </aside>
 
       <section className="chat-view">

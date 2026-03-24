@@ -1,33 +1,22 @@
 # RoboChat
 
-RoboChat — **реальный чат для людей** в стиле Telegram на Next.js.
-Сообщения синхронизируются через **Firebase Realtime Database**, поэтому два и более пользователя могут общаться в одной комнате в реальном времени.
+RoboChat — чат в стиле Telegram на Next.js с **файловой БД**.
+Сообщения хранятся в `data/messages.json` и доступны всем пользователям одной комнаты.
 
-## Что умеет
+## Как работает
 
-- Вход по нику и названию комнаты.
-- Общая переписка для всех пользователей комнаты.
-- Realtime-обновления без перезагрузки страницы.
-- Готовый деплой на Vercel.
+- Пользователь вводит ник и комнату.
+- Сообщения пишутся в API `POST /api/messages`.
+- Клиент обновляет чат каждые 1.5 сек через `GET /api/messages`.
+- Хранилище: JSON-файл `data/messages.json`.
 
-## 1) Подготовка Firebase
+## Структура
 
-1. Создайте проект в Firebase Console.
-2. Включите **Realtime Database** (режим test для старта).
-3. В настройках проекта создайте Web App и скопируйте конфиг.
-4. Возьмите значения и заполните переменные окружения:
+- `app/api/messages/route.ts` — API для чтения/записи сообщений.
+- `lib/file-db.ts` — работа с файловой БД.
+- `data/messages.json` — сама база данных.
 
-```bash
-NEXT_PUBLIC_FIREBASE_API_KEY=
-NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=
-NEXT_PUBLIC_FIREBASE_DATABASE_URL=
-NEXT_PUBLIC_FIREBASE_PROJECT_ID=
-NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=
-NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=
-NEXT_PUBLIC_FIREBASE_APP_ID=
-```
-
-## 2) Локальный запуск
+## Локальный запуск
 
 ```bash
 npm install
@@ -36,15 +25,15 @@ npm run dev
 
 Открыть: http://localhost:3000
 
-## 3) Деплой на Vercel (по новой)
+## Деплой на Vercel
 
-1. Залейте репозиторий в GitHub.
-2. В Vercel: **Add New Project** → выберите репозиторий.
-3. В разделе **Environment Variables** добавьте все `NEXT_PUBLIC_FIREBASE_*` переменные.
-4. Нажмите **Deploy**.
+```bash
+vercel
+```
 
-После деплоя откройте сайт, введите ник/комнату (например `general`) и общайтесь с другими людьми, у которых открыта та же комната.
+Или через GitHub → Vercel Dashboard → Deploy.
 
-## Примечание по безопасности
+### Важно про файловую БД на Vercel
 
-Для production обязательно ограничьте правила Realtime Database (security rules), чтобы избежать спама и несанкционированной записи.
+На Vercel файловая система временная (ephemeral), поэтому `data/messages.json` может сбрасываться между деплоями/инстансами.
+Для постоянного хранения в production лучше заменить файловую БД на внешнюю (Postgres, Supabase, Redis и т.д.).
