@@ -1,15 +1,33 @@
 # RoboChat
 
-RoboChat — веб-чат в стиле Telegram на **Next.js**, готовый к деплою на **Vercel**.
+RoboChat — **реальный чат для людей** в стиле Telegram на Next.js.
+Сообщения синхронизируются через **Firebase Realtime Database**, поэтому два и более пользователя могут общаться в одной комнате в реальном времени.
 
-## Возможности
+## Что умеет
 
-- Интерфейс с левой колонкой чатов и правой областью переписки.
-- Отправка сообщений из поля ввода.
-- Автоответ от простого встроенного бота.
-- Адаптивность для мобильных устройств.
+- Вход по нику и названию комнаты.
+- Общая переписка для всех пользователей комнаты.
+- Realtime-обновления без перезагрузки страницы.
+- Готовый деплой на Vercel.
 
-## Локальный запуск
+## 1) Подготовка Firebase
+
+1. Создайте проект в Firebase Console.
+2. Включите **Realtime Database** (режим test для старта).
+3. В настройках проекта создайте Web App и скопируйте конфиг.
+4. Возьмите значения и заполните переменные окружения:
+
+```bash
+NEXT_PUBLIC_FIREBASE_API_KEY=
+NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=
+NEXT_PUBLIC_FIREBASE_DATABASE_URL=
+NEXT_PUBLIC_FIREBASE_PROJECT_ID=
+NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=
+NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=
+NEXT_PUBLIC_FIREBASE_APP_ID=
+```
+
+## 2) Локальный запуск
 
 ```bash
 npm install
@@ -18,18 +36,15 @@ npm run dev
 
 Открыть: http://localhost:3000
 
-## Проверка production-сборки
+## 3) Деплой на Vercel (по новой)
 
-```bash
-npm run build
-npm run start
-```
-
-## Деплой на Vercel
-
-1. Загрузите репозиторий в GitHub.
-2. В Vercel нажмите **Add New Project** и выберите репозиторий.
-3. Framework Preset: **Next.js** (определится автоматически).
+1. Залейте репозиторий в GitHub.
+2. В Vercel: **Add New Project** → выберите репозиторий.
+3. В разделе **Environment Variables** добавьте все `NEXT_PUBLIC_FIREBASE_*` переменные.
 4. Нажмите **Deploy**.
 
-Готово: приложение `robochat` будет развёрнуто.
+После деплоя откройте сайт, введите ник/комнату (например `general`) и общайтесь с другими людьми, у которых открыта та же комната.
+
+## Примечание по безопасности
+
+Для production обязательно ограничьте правила Realtime Database (security rules), чтобы избежать спама и несанкционированной записи.

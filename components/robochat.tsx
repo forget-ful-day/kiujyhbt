@@ -1,158 +1,243 @@
 "use client";
 
-import { FormEvent, useMemo, useRef, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { initializeApp, getApps } from "firebase/app";
+import {
+  Database,
+  getDatabase,
+  onChildAdded,
+  push,
+  ref,
+  serverTimestamp,
+  query,
+  limitToLast
+} from "firebase/database";
 
-type Message = {
+type ChatMessage = {
   id: string;
-  author: "me" | "bot";
+  roomId: string;
+  author: string;
   text: string;
-  time: string;
+  createdAt: number;
 };
 
-const contacts = [
-  { id: "ai-helper", name: "AI Helper", status: "онлайн" },
-  { id: "dev-team", name: "Dev Team", status: "был(а) недавно" },
-  { id: "support", name: "Support", status: "онлайн" }
-];
+type JoinForm = {
+  nickname: string;
+  roomId: string;
+};
 
-const initialMessages: Message[] = [
-  {
-    id: "1",
-    author: "bot",
-    text: "Привет! Я RoboChat Bot. Напиши мне что-нибудь 🤖",
-    time: "10:01"
-  },
-  {
-    id: "2",
-    author: "me",
-    text: "Сделай интерфейс как в Telegram",
-    time: "10:02"
-  },
-  {
-    id: "3",
-    author: "bot",
-    text: "Готово — минималистичный стиль, пузыри сообщений и список чатов слева ✅",
-    time: "10:03"
-  }
-];
+const firebaseConfig = {
+  apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
+  authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
+  databaseURL: process.env.NEXT_PUBLIC_FIREBASE_DATABASE_URL,
+  projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
+  storageBucket: process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
+  appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID
+};
 
-function formatNow() {
+function getMissingEnv() {
+  return Object.entries(firebaseConfig)
+    .filter(([, value]) => !value)
+    .map(([key]) => key);
+}
+
+function createDatabase(): Database {
+  const app = getApps()[0] ?? initializeApp(firebaseConfig);
+  return getDatabase(app);
+}
+
+function formatTime(value: number) {
   return new Intl.DateTimeFormat("ru-RU", {
     hour: "2-digit",
     minute: "2-digit"
-  }).format(new Date());
+  }).format(new Date(value));
 }
 
-function buildBotReply(userText: string): string {
-  const normalized = userText.trim().toLowerCase();
-
-  if (normalized.includes("привет")) {
-    return "Привет! Я на связи. Могу ответить или просто поддержать диалог.";
-  }
-
-  if (normalized.includes("версел") || normalized.includes("vercel")) {
-    return "Этот проект уже готов к деплою на Vercel: npm install && npm run build.";
-  }
-
-  if (normalized.includes("помоги")) {
-    return "Конечно! Опиши задачу, и я помогу по шагам.";
-  }
-
-  return `Я получил сообщение: «${userText}». Можно добавить интеграцию с API для настоящего live-чата.`;
+function sanitizeRoomId(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9_-]/g, "").slice(0, 32);
 }
 
 export function RoboChat() {
-  const [messages, setMessages] = useState<Message[]>(initialMessages);
+  const [joinForm, setJoinForm] = useState<JoinForm>({ nickname: "", roomId: "general" });
+  const [joined, setJoined] = useState(false);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [draft, setDraft] = useState("");
-  const [activeContact, setActiveContact] = useState(contacts[0]);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const [error, setError] = useState<string>("");
+  const [isSending, setIsSending] = useState(false);
 
-  const title = useMemo(() => `RoboChat · ${activeContact.name}`, [activeContact.name]);
+  const dbRef = useRef<Database | null>(null);
 
-  function sendMessage(event: FormEvent) {
-    event.preventDefault();
+  const activeRoom = useMemo(() => sanitizeRoomId(joinForm.roomId) || "general", [joinForm.roomId]);
+  const nickname = useMemo(() => joinForm.nickname.trim().slice(0, 30), [joinForm.nickname]);
+  const missingEnv = getMissingEnv();
 
-    const text = draft.trim();
-    if (!text) {
+  useEffect(() => {
+    if (!joined) {
       return;
     }
 
-    const userMessage: Message = {
-      id: crypto.randomUUID(),
-      author: "me",
-      text,
-      time: formatNow()
-    };
+    try {
+      const db = dbRef.current ?? createDatabase();
+      dbRef.current = db;
 
-    setMessages((prev) => [...prev, userMessage]);
-    setDraft("");
+      const messagesQuery = query(ref(db, `rooms/${activeRoom}/messages`), limitToLast(100));
+      setMessages([]);
 
-    const botMessage: Message = {
-      id: crypto.randomUUID(),
-      author: "bot",
-      text: buildBotReply(text),
-      time: formatNow()
-    };
+      const unsubscribe = onChildAdded(messagesQuery, (snapshot) => {
+        const value = snapshot.val() as { author?: string; text?: string; createdAt?: number } | null;
+        if (!value?.text || !value?.author) {
+          return;
+        }
 
-    setTimeout(() => {
-      setMessages((prev) => [...prev, botMessage]);
-    }, 400);
+        const message: ChatMessage = {
+          id: snapshot.key ?? crypto.randomUUID(),
+          roomId: activeRoom,
+          author: value.author,
+          text: value.text,
+          createdAt: typeof value.createdAt === "number" ? value.createdAt : Date.now()
+        };
 
-    inputRef.current?.focus();
+        setMessages((prev) => {
+          if (prev.some((item) => item.id === message.id)) {
+            return prev;
+          }
+          return [...prev, message];
+        });
+      });
+
+      return () => {
+        unsubscribe();
+      };
+    } catch {
+      setError("Не удалось подключиться к Firebase. Проверьте переменные окружения.");
+    }
+  }, [joined, activeRoom]);
+
+  function joinChat(event: FormEvent) {
+    event.preventDefault();
+
+    if (missingEnv.length > 0) {
+      setError(`Заполните env переменные Firebase: ${missingEnv.join(", ")}`);
+      return;
+    }
+
+    if (!nickname) {
+      setError("Введите имя пользователя.");
+      return;
+    }
+
+    if (!activeRoom) {
+      setError("Введите room ID (латиница/цифры). Например: general");
+      return;
+    }
+
+    setError("");
+    setJoined(true);
+  }
+
+  async function sendMessage(event: FormEvent) {
+    event.preventDefault();
+
+    const text = draft.trim();
+    if (!text || !joined || !dbRef.current) {
+      return;
+    }
+
+    setIsSending(true);
+    try {
+      const roomMessagesRef = ref(dbRef.current, `rooms/${activeRoom}/messages`);
+      await push(roomMessagesRef, {
+        author: nickname,
+        text,
+        createdAt: serverTimestamp()
+      });
+
+      setDraft("");
+      setError("");
+    } catch {
+      setError("Не удалось отправить сообщение. Повторите попытку.");
+    } finally {
+      setIsSending(false);
+    }
+  }
+
+  if (!joined) {
+    return (
+      <main className="join-layout">
+        <section className="join-card">
+          <h1>RoboChat</h1>
+          <p>Реальный чат для людей. Подключи Firebase и общайся в комнате.</p>
+
+          <form className="join-form" onSubmit={joinChat}>
+            <label>
+              Ваш ник
+              <input
+                value={joinForm.nickname}
+                onChange={(event) => setJoinForm((prev) => ({ ...prev, nickname: event.target.value }))}
+                placeholder="Например, Alex"
+              />
+            </label>
+
+            <label>
+              Комната
+              <input
+                value={joinForm.roomId}
+                onChange={(event) => setJoinForm((prev) => ({ ...prev, roomId: event.target.value }))}
+                placeholder="general"
+              />
+            </label>
+
+            {error && <p className="error-text">{error}</p>}
+
+            <button type="submit">Войти в чат</button>
+          </form>
+        </section>
+      </main>
+    );
   }
 
   return (
     <main className="layout">
       <aside className="sidebar">
         <div className="brand">RoboChat</div>
-        <input className="search" placeholder="Поиск" />
-
-        <div className="chat-list">
-          {contacts.map((contact) => {
-            const isActive = activeContact.id === contact.id;
-            return (
-              <button
-                key={contact.id}
-                className={`chat-item ${isActive ? "active" : ""}`}
-                onClick={() => setActiveContact(contact)}
-              >
-                <div className="chat-avatar">{contact.name[0]}</div>
-                <div>
-                  <p className="chat-name">{contact.name}</p>
-                  <p className="chat-status">{contact.status}</p>
-                </div>
-              </button>
-            );
-          })}
-        </div>
+        <p className="chat-status">Пользователь: {nickname}</p>
+        <p className="chat-status">Комната: #{activeRoom}</p>
       </aside>
 
       <section className="chat-view">
         <header className="chat-header">
-          <h1>{title}</h1>
-          <span>{activeContact.status}</span>
+          <h1>Комната #{activeRoom}</h1>
+          <span>{messages.length} сообщений</span>
         </header>
 
         <div className="messages">
-          {messages.map((message) => (
-            <div key={message.id} className={`bubble-row ${message.author === "me" ? "me" : "bot"}`}>
-              <div className={`bubble ${message.author === "me" ? "me" : "bot"}`}>
-                <p>{message.text}</p>
-                <span>{message.time}</span>
+          {messages.length === 0 && <p className="chat-status">Пока пусто. Напишите первое сообщение 👋</p>}
+          {messages.map((message) => {
+            const isMe = message.author === nickname;
+            return (
+              <div key={message.id} className={`bubble-row ${isMe ? "me" : "bot"}`}>
+                <div className={`bubble ${isMe ? "me" : "bot"}`}>
+                  <b>{message.author}</b>
+                  <p>{message.text}</p>
+                  <span>{formatTime(message.createdAt)}</span>
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
 
         <form className="composer" onSubmit={sendMessage}>
           <input
-            ref={inputRef}
             value={draft}
             onChange={(event) => setDraft(event.target.value)}
             placeholder="Напишите сообщение..."
           />
-          <button type="submit">Отправить</button>
+          <button type="submit" disabled={isSending}>
+            {isSending ? "..." : "Отправить"}
+          </button>
         </form>
+        {error && <p className="composer-error">{error}</p>}
       </section>
     </main>
   );
